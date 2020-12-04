@@ -20,6 +20,8 @@ from mlagents.trainers.tests.dummy_config import (  # noqa: F401; pylint: disabl
     ppo_dummy_config,
 )
 
+from mlagents_envs.base_env import ActionSpec
+
 
 @pytest.fixture
 def dummy_config():
@@ -31,6 +33,9 @@ VECTOR_OBS_SPACE = 8
 DISCRETE_ACTION_SPACE = [3, 3, 3, 2]
 BUFFER_INIT_SAMPLES = 64
 NUM_AGENTS = 12
+
+CONTINUOUS_ACTION_SPEC = ActionSpec.create_continuous(VECTOR_ACTION_SPACE)
+DISCRETE_ACTION_SPEC = ActionSpec.create_discrete(tuple(DISCRETE_ACTION_SPACE))
 
 
 def _create_ppo_optimizer_ops_mock(dummy_config, use_rnn, use_discrete, use_visual):
@@ -67,13 +72,25 @@ def test_ppo_optimizer_update(dummy_config, rnn, visual, discrete):
         dummy_config, use_rnn=rnn, use_discrete=discrete, use_visual=visual
     )
     # Test update
-    update_buffer = mb.simulate_rollout(
-        BUFFER_INIT_SAMPLES, optimizer.policy.behavior_spec
-    )
+    behavior_spec = optimizer.policy.behavior_spec
+    update_buffer = mb.simulate_rollout(BUFFER_INIT_SAMPLES, behavior_spec)
     # Mock out reward signal eval
     update_buffer["advantages"] = update_buffer["environment_rewards"]
     update_buffer["extrinsic_returns"] = update_buffer["environment_rewards"]
     update_buffer["extrinsic_value_estimates"] = update_buffer["environment_rewards"]
+    # NOTE: This is because TF outputs the log probs of all actions whereas PyTorch does not
+    if discrete:
+        n_agents = len(update_buffer["discrete_log_probs"])
+        update_buffer["discrete_log_probs"] = np.ones(
+            (n_agents, int(sum(behavior_spec.action_spec.discrete_branches))),
+            dtype=np.float32,
+        )
+    else:
+        n_agents = len(update_buffer["continuous_log_probs"])
+        update_buffer["continuous_log_probs"] = np.ones(
+            (n_agents, behavior_spec.action_spec.continuous_size), dtype=np.float32
+        )
+
     optimizer.update(
         update_buffer,
         num_sequences=update_buffer.num_experiences // optimizer.policy.sequence_length,
@@ -94,15 +111,26 @@ def test_ppo_optimizer_update_curiosity(
         dummy_config, use_rnn=rnn, use_discrete=discrete, use_visual=visual
     )
     # Test update
-    update_buffer = mb.simulate_rollout(
-        BUFFER_INIT_SAMPLES, optimizer.policy.behavior_spec
-    )
+    behavior_spec = optimizer.policy.behavior_spec
+    update_buffer = mb.simulate_rollout(BUFFER_INIT_SAMPLES, behavior_spec)
     # Mock out reward signal eval
     update_buffer["advantages"] = update_buffer["environment_rewards"]
     update_buffer["extrinsic_returns"] = update_buffer["environment_rewards"]
     update_buffer["extrinsic_value_estimates"] = update_buffer["environment_rewards"]
     update_buffer["curiosity_returns"] = update_buffer["environment_rewards"]
     update_buffer["curiosity_value_estimates"] = update_buffer["environment_rewards"]
+    # NOTE: This is because TF outputs the log probs of all actions whereas PyTorch does not
+    if discrete:
+        n_agents = len(update_buffer["discrete_log_probs"])
+        update_buffer["discrete_log_probs"] = np.ones(
+            (n_agents, int(sum(behavior_spec.action_spec.discrete_branches))),
+            dtype=np.float32,
+        )
+    else:
+        n_agents = len(update_buffer["continuous_log_probs"])
+        update_buffer["continuous_log_probs"] = np.ones(
+            (n_agents, behavior_spec.action_spec.continuous_size), dtype=np.float32
+        )
     optimizer.update(
         update_buffer,
         num_sequences=update_buffer.num_experiences // optimizer.policy.sequence_length,
@@ -121,15 +149,19 @@ def test_ppo_optimizer_update_gail(gail_dummy_config, dummy_config):  # noqa: F8
         use_visual=False,
     )
     # Test update
-    update_buffer = mb.simulate_rollout(
-        BUFFER_INIT_SAMPLES, optimizer.policy.behavior_spec
-    )
+    behavior_spec = optimizer.policy.behavior_spec
+    update_buffer = mb.simulate_rollout(BUFFER_INIT_SAMPLES, behavior_spec)
     # Mock out reward signal eval
     update_buffer["advantages"] = update_buffer["environment_rewards"]
     update_buffer["extrinsic_returns"] = update_buffer["environment_rewards"]
     update_buffer["extrinsic_value_estimates"] = update_buffer["environment_rewards"]
     update_buffer["gail_returns"] = update_buffer["environment_rewards"]
     update_buffer["gail_value_estimates"] = update_buffer["environment_rewards"]
+    # NOTE: This is because TF outputs the log probs of all actions whereas PyTorch does not
+    n_agents = len(update_buffer["continuous_log_probs"])
+    update_buffer["continuous_log_probs"] = np.ones(
+        (n_agents, behavior_spec.action_spec.continuous_size), dtype=np.float32
+    )
     optimizer.update(
         update_buffer,
         num_sequences=update_buffer.num_experiences // optimizer.policy.sequence_length,
@@ -163,8 +195,7 @@ def test_ppo_get_value_estimates(dummy_config, rnn, visual, discrete):
         length=time_horizon,
         observation_shapes=optimizer.policy.behavior_spec.observation_shapes,
         max_step_complete=True,
-        action_space=DISCRETE_ACTION_SPACE if discrete else VECTOR_ACTION_SPACE,
-        is_discrete=discrete,
+        action_spec=DISCRETE_ACTION_SPEC if discrete else CONTINUOUS_ACTION_SPEC,
     )
     run_out, final_value_out = optimizer.get_trajectory_value_estimates(
         trajectory.to_agentbuffer(), trajectory.next_obs, done=False
@@ -260,7 +291,26 @@ def test_trainer_update_policy(
     buffer["curiosity_returns"] = buffer["environment_rewards"]
     buffer["curiosity_value_estimates"] = buffer["environment_rewards"]
     buffer["advantages"] = buffer["environment_rewards"]
-
+    # NOTE: This is because TF outputs the log probs of all actions whereas PyTorch does not
+    if use_discrete:
+        n_agents = len(buffer["discrete_log_probs"])
+        buffer["discrete_log_probs"].reset_field()
+        for _ in range(n_agents):
+            buffer["discrete_log_probs"].append(
+                np.ones(
+                    int(sum(mock_behavior_spec.action_spec.discrete_branches)),
+                    dtype=np.float32,
+                )
+            )
+    else:
+        n_agents = len(buffer["continuous_log_probs"])
+        buffer["continuous_log_probs"].reset_field()
+        for _ in range(n_agents):
+            buffer["continuous_log_probs"].append(
+                np.ones(
+                    mock_behavior_spec.action_spec.continuous_size, dtype=np.float32
+                )
+            )
     trainer.update_buffer = buffer
     trainer._update_policy()
 
@@ -284,7 +334,7 @@ def test_process_trajectory(dummy_config):
         length=time_horizon,
         observation_shapes=behavior_spec.observation_shapes,
         max_step_complete=True,
-        action_space=[2],
+        action_spec=behavior_spec.action_spec,
     )
     trajectory_queue.put(trajectory)
     trainer.advance()
@@ -308,7 +358,7 @@ def test_process_trajectory(dummy_config):
         length=time_horizon + 1,
         max_step_complete=False,
         observation_shapes=behavior_spec.observation_shapes,
-        action_space=[2],
+        action_spec=behavior_spec.action_spec,
     )
     trajectory_queue.put(trajectory)
     trainer.advance()

@@ -7,13 +7,13 @@ from mlagents_envs.timers import timed
 from mlagents.tf_utils import tf
 from mlagents import tf_utils
 from mlagents_envs.exception import UnityException
-from mlagents_envs.base_env import BehaviorSpec
 from mlagents_envs.logging_util import get_logger
 from mlagents.trainers.policy import Policy
 from mlagents.trainers.action_info import ActionInfo
 from mlagents.trainers.trajectory import SplitObservations
+from mlagents.trainers.torch.action_log_probs import LogProbsTuple
 from mlagents.trainers.behavior_id_utils import get_global_agent_id
-from mlagents_envs.base_env import DecisionSteps
+from mlagents_envs.base_env import DecisionSteps, ActionTuple, BehaviorSpec
 from mlagents.trainers.tf.models import ModelUtils
 from mlagents.trainers.settings import TrainerSettings, EncoderType
 from mlagents.trainers import __version__
@@ -77,6 +77,13 @@ class TFPolicy(Policy):
             reparameterize,
             condition_sigma_on_obs,
         )
+        if (
+            self.behavior_spec.action_spec.continuous_size > 0
+            and self.behavior_spec.action_spec.discrete_size > 0
+        ):
+            raise UnityPolicyException(
+                "TensorFlow does not support mixed action spaces. Please run with the Torch framework."
+            )
         # for ghost trainer save/load snapshots
         self.assign_phs: List[tf.Tensor] = []
         self.assign_ops: List[tf.Operation] = []
@@ -241,6 +248,7 @@ class TFPolicy(Policy):
                 feed_dict[self.prev_action] = self.retrieve_previous_action(
                     global_agent_ids
                 )
+
             feed_dict[self.memory_in] = self.retrieve_memories(global_agent_ids)
         feed_dict = self.fill_eval_dict(feed_dict, decision_requests)
         run_out = self._execute_model(feed_dict, self.inference_dict)
@@ -270,6 +278,21 @@ class TFPolicy(Policy):
         )
 
         self.save_memories(global_agent_ids, run_out.get("memory_out"))
+        # For Compatibility with buffer changes for hybrid action support
+        if "log_probs" in run_out:
+            log_probs_tuple = LogProbsTuple()
+            if self.behavior_spec.action_spec.is_continuous():
+                log_probs_tuple.add_continuous(run_out["log_probs"])
+            else:
+                log_probs_tuple.add_discrete(run_out["log_probs"])
+            run_out["log_probs"] = log_probs_tuple
+        if "action" in run_out:
+            action_tuple = ActionTuple()
+            if self.behavior_spec.action_spec.is_continuous():
+                action_tuple.add_continuous(run_out["action"])
+            else:
+                action_tuple.add_discrete(run_out["action"])
+            run_out["action"] = action_tuple
         return ActionInfo(
             action=run_out.get("action"),
             value=run_out.get("value"),
@@ -307,7 +330,7 @@ class TFPolicy(Policy):
             mask = np.ones(
                 (
                     len(batched_step_result),
-                    sum(self.behavior_spec.discrete_action_branches),
+                    sum(self.behavior_spec.action_spec.discrete_branches),
                 ),
                 dtype=np.float32,
             )
@@ -445,7 +468,7 @@ class TFPolicy(Policy):
             self.mask = tf.cast(self.mask_input, tf.int32)
 
             tf.Variable(
-                int(self.behavior_spec.is_action_continuous()),
+                int(self.behavior_spec.action_spec.is_continuous()),
                 name="is_continuous_control",
                 trainable=False,
                 dtype=tf.int32,
@@ -479,7 +502,7 @@ class TFPolicy(Policy):
             tf.Variable(
                 self.m_size, name="memory_size", trainable=False, dtype=tf.int32
             )
-            if self.behavior_spec.is_action_continuous():
+            if self.behavior_spec.action_spec.is_continuous():
                 tf.Variable(
                     self.act_size[0],
                     name="action_output_shape",
